@@ -50,7 +50,8 @@ hyperliquid_ofi_trader/
 ├── regime/
 │   ├── liquidity.py            # 深度 / spread 状态
 │   ├── volatility.py           # 波动率 Regime
-│   └── liquidation.py          # 极端 / 清算检测
+│   ├── liquidation.py          # 极端 / 清算检测
+│   └── regime_detector.py     # 市场状态检测器（新增）
 │
 ├── signals/
 │   ├── ofi.py                  # OFI 计算
@@ -163,13 +164,99 @@ class LiquidityRegime:
 
 ---
 
+## 3️⃣+1️⃣ regime/regime_detector.py（新增：市场状态检测器）
+
+```python
+class RegimeDetector:
+    def __init__(self, liquidity_window=1000, volatility_window=1000,
+                 liquidity_q25=None, volatility_q90=None):
+        """
+        市场状态检测器
+        
+        将连续的市场指标转换为离散的状态标签，供权重调整使用
+        """
+    
+    def update_liquidity(self, depth: float):
+        """更新流动性历史"""
+    
+    def update_volatility(self, volatility: float):
+        """更新波动率历史"""
+    
+    def detect_liquidity_regime(self) -> str:
+        """
+        检测流动性状态
+        
+        Returns:
+            'low' | 'normal' | 'high'
+        """
+    
+    def detect_volatility_regime(self) -> str:
+        """
+        检测波动率状态
+        
+        Returns:
+            'low' | 'normal' | 'high'
+        """
+    
+    def detect_extreme_state(self) -> bool:
+        """
+        检测极端状态（低流动性 + 高波动率）
+        """
+    
+    def get_regime(self) -> dict:
+        """
+        获取完整市场状态
+        
+        Returns:
+            {
+                'liquidity': 'low' | 'normal' | 'high',
+                'volatility': 'low' | 'normal' | 'high',
+                'extreme': bool
+            }
+        """
+```
+
+📌 **用途**：为 AlphaCombiner 提供状态信息，用于动态权重调整
+
+---
+
 ## 4️⃣ signals/leadlag.py（方向来源）
 
 ```python
 class LeadLagSignal:
-    def update(self, lead_mid, lag_mid) -> int:
+    def __init__(self, lead_symbol, lag_symbol, time_window_ms=100, 
+                 use_sign=True, use_weighted=False):
         """
-        返回 -1 / 0 / +1
+        Args:
+            lead_symbol: Lead 资产符号（如 "BTC-PERP"）
+            lag_symbol: Lag 资产符号（如 "ETH-PERP"）
+            time_window_ms: 时间窗口（毫秒）
+            use_sign: 是否使用 sign()（默认 True，推荐）
+            use_weighted: 是否使用加权版本（可选增强）
+        """
+    
+    def update(self, lead_mid, lag_mid):
+        """更新价格"""
+    
+    def compute(self) -> int:
+        """
+        计算 Lead-Lag 信号
+        
+        返回 -1 / 0 / +1（标准版本）
+        或 float（加权版本）
+        """
+    
+    def get_signal_info(self) -> dict:
+        """
+        获取信号信息（用于监控和调试）
+        
+        Returns:
+            {
+                'signal': int/float,
+                'delta': float,
+                'method': 'sign' | 'weighted' | 'raw',
+                'window_ms': int
+            }
         """
 ```
 
@@ -178,21 +265,81 @@ class LeadLagSignal:
 * Lead 和 Lag 必须不同 symbol
 * 时间窗口 < 300ms
 
+📌 **设计选择说明**：
+
+* **为什么使用 sign()？**
+  - 在高频尺度（50-200ms），方向信号比幅度信号更稳定
+  - 幅度信息已在 OFI 和 AV 中体现
+  - 信号职责分离：Lead-Lag 提供方向，OFI 提供强度
+
+* **可选增强版本**：
+  - 使用 `use_weighted=True` 启用加权版本
+  - 公式：`sign(Δp) * min(1.0, |Δp| / σ)`
+  - 保留幅度信息但标准化
+
 ---
 
 ## 5️⃣ alpha/combiner.py（灵魂模块）
 
 ```python
 class AlphaCombiner:
+    def __init__(self, base_weights: dict = None):
+        """
+        Args:
+            base_weights: 基础权重配置
+                {
+                    'leadlag': 0.5,
+                    'ofi': 0.3,
+                    'av': 0.2
+                }
+        """
+    
+    def compute_weights(self, regime: dict) -> dict:
+        """
+        基于市场状态计算动态权重
+        
+        Args:
+            regime: 市场状态字典
+                {
+                    'liquidity': 'low' | 'normal' | 'high',
+                    'volatility': 'low' | 'normal' | 'high',
+                    'extreme': bool
+                }
+        
+        Returns:
+            调整后的权重字典
+        """
+    
     def compute(self, signals: dict, regime: dict) -> float:
         """
-        signals = {
-          'leadlag': float,
-          'ofi': float,
-          'av': float
-        }
+        计算 Alpha 值
+        
+        Args:
+            signals: 信号字典
+                {
+                    'leadlag': float,  # -1, 0, 1
+                    'ofi': float,      # 标准化后的 OFI
+                    'av': float        # 标准化后的 Aggressive Volume
+                }
+            regime: 市场状态字典
+        
+        Returns:
+            Alpha 值，范围 [-1, 1]
+        """
+    
+    def get_current_weights(self, regime: dict) -> dict:
+        """
+        获取当前状态下的权重（用于监控和调试）
         """
 ```
+
+📌 **重要修正**：
+
+* **原设计问题**：固定权重违反时间尺度一致性
+* **修正方案**：基于市场状态的动态权重调整
+  - 高波动率 → 降低 Lead-Lag 权重（慢信号）
+  - 低流动性 → 降低 OFI 权重（易受 spoof）
+  - 极端状态 → 降低所有信号权重
 
 📌 这里 **不允许下单**
 这里只输出 alpha（-1 ~ +1）
@@ -264,17 +411,52 @@ on_ws_event(event):
     update_orderbook(event)
     update_trades(event)
 
-    update_regimes()
+    # 更新状态检测器
+    depth = orderbook.depth(levels=5)
+    volatility = market_state.get_volatility()
+    regime_detector.update_liquidity(depth)
+    regime_detector.update_volatility(volatility)
+    
+    # 获取市场状态
+    regime = regime_detector.get_regime()
+    
+    # 检查是否可交易
     if not regimes.tradable():
         return
 
-    signals = compute_signals()
-    alpha = combiner.compute(signals, regimes)
+    # 计算信号
+    signals = {
+        'leadlag': leadlag_signal.compute(),
+        'ofi': ofi_calculator.get_scaled(),
+        'av': aggressive_volume.compute()
+    }
+    
+    # 使用动态权重计算 Alpha
+    alpha = combiner.compute(signals, regime)
+    
+    # 应用信任分数调整（如果启用）
+    if trust_manager:
+        weights = combiner.compute_weights(regime)
+        for signal_name in weights:
+            trust_factor = trust_manager.get_weight_adjustment(signal_name)
+            weights[signal_name] *= trust_factor
+        # 重新计算 alpha
+        alpha_raw = sum(weights[k] * signals[k] for k in signals)
+        alpha = tanh(alpha_raw)
 
     if abs(alpha) < alpha_min:
         return
 
     execution.route(alpha, signals['ofi'], position)
+    
+# 订单成交回调：更新信任分数
+on_order_filled(order_id, fill_info):
+    signal_name = fill_info['signal_name']
+    slippage = fill_info['slippage']
+    fill_rate = fill_info['fill_rate']
+    expected_slippage = fill_info.get('expected_slippage', 0.001)
+    
+    trust_manager.update(signal_name, slippage, fill_rate, expected_slippage)
 ```
 
 📌 **注意**：

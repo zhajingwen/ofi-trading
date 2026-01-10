@@ -168,23 +168,63 @@ MP = (ask1*bid_size + bid1*ask_size) / (bid_size + ask_size)
 
 ## 七、④ 决策融合层（State-aware Alpha）
 
-### 线性组合（基础）
+### 权重选择策略（重要修正）
+
+**原设计问题：**
+原文档使用固定权重（0.5, 0.3, 0.2），违反了时间尺度一致性原则：
+- OFI：快信号，半衰期 ~10-50ms
+- Lead-Lag：慢信号，半衰期 ~100-500ms
+- Aggressive Volume：中速信号，半衰期 ~50-200ms
+
+**修正方案：Regime-Dependent Weight（推荐）**
+
+基于市场状态动态调整权重：
 
 ```text
+# 基础权重
+base_weights = {
+    'leadlag': 0.5,
+    'ofi': 0.3,
+    'av': 0.2
+}
+
+# 高波动率调整：降低慢信号（Lead-Lag）权重
+if volatility == 'high':
+    w_leadlag *= 0.5  # 减半
+    w_ofi *= 1.2      # 快信号更可靠
+    w_av *= 1.1
+
+# 低流动性调整：降低 OFI 权重（易受 spoof 影响）
+if liquidity == 'low':
+    w_ofi *= 0.3      # 大幅降低
+    w_av *= 1.3      # 成交数据更可靠
+
+# 极端状态调整：降低所有信号权重
+if extreme:
+    for w in weights:
+        w *= 0.5  # 保守策略
+```
+
+**优点：**
+- 实时响应市场状态变化
+- 不需要历史数据
+- 计算简单，延迟低
+
+### 线性组合（更新）
+
+```text
+# 使用动态权重
+weights = compute_weights(regime)
+
 alpha_raw =
-    w1 * LeadLag +
-    w2 * OFI_scaled +
-    w3 * AV
+    weights['leadlag'] * LeadLag +
+    weights['ofi'] * OFI_scaled +
+    weights['av'] * AV
 ```
 
-### 状态条件化
+### 状态条件化（已集成到权重计算中）
 
-```text
-if liquidity_low:
-    w2 ↓
-if volatility_high:
-    w1 ↓
-```
+状态条件化逻辑已集成到 `compute_weights()` 方法中，无需单独处理。
 
 ### 非线性压缩（必须）
 
@@ -244,11 +284,33 @@ if OFI 强 but slippage ↑ and fill_rate ↓:
 if not regime_ok():
     return
 
+# 计算信号
 leadlag = leadlag("BTC", "ETH")
 ofi = ofi_scaled("ETH")
 av = aggressive_volume("ETH")
 
-alpha = tanh(0.5*leadlag + 0.3*ofi + 0.2*av)
+signals = {
+    'leadlag': leadlag,
+    'ofi': ofi,
+    'av': av
+}
+
+# 获取市场状态
+regime = regime_detector.get_regime()
+
+# 使用动态权重计算 Alpha
+alpha_combiner = AlphaCombiner()
+alpha = alpha_combiner.compute(signals, regime)
+
+# 应用信任分数调整（如果启用）
+if trust_manager:
+    weights = alpha_combiner.compute_weights(regime)
+    for signal_name in weights:
+        trust_factor = trust_manager.get_weight_adjustment(signal_name)
+        weights[signal_name] *= trust_factor
+    # 重新计算 alpha
+    alpha_raw = sum(weights[k] * signals[k] for k in signals)
+    alpha = tanh(alpha_raw)
 
 size = base_size * abs(alpha)
 side = BUY if alpha > 0 else SELL
