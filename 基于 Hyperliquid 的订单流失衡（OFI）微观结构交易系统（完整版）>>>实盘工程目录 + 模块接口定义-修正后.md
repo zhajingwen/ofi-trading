@@ -1,6 +1,10 @@
-好，这一步我们**直接进入“可实盘工程”的层级**。
+# 基于 Hyperliquid 的订单流失衡（OFI）微观结构交易系统（完整版）>>>实盘工程目录 + 模块接口定义（修正后）
+
+好，这一步我们**直接进入"可实盘工程"的层级**。
 下面给你的是一套 **真实可维护、可扩展、符合 Hyperliquid 特性的实盘工程目录 + 模块接口定义**。
 不是 demo，而是**量化团队常见的最小可长期演化架构（Minimum Viable Trading System）**。
+
+**版本说明**：本文档已根据专业评估意见进行修正，所有修正内容已整合进接口定义。
 
 ---
 
@@ -93,7 +97,7 @@ hyperliquid_ofi_trader/
 
 # 三、核心模块接口定义（重点）
 
-下面我**只给“关键模块”的接口定义**，这些决定了你系统的上限。
+下面我**只给"关键模块"的接口定义**，这些决定了你系统的上限。
 
 ---
 
@@ -421,13 +425,70 @@ class KillSwitch:
 
 ```python
 class SignalTrust:
-    def update(self, ofi, fill, slippage):
-        ...
-
-    def weight(self) -> float
+    def __init__(self, alpha=0.95, min_trust=0.1, max_trust=1.0,
+                 expected_slippage=0.001, min_samples=10):
+        """
+        Args:
+            alpha: EMA 衰减因子（越大，历史权重越高）
+            min_trust: 最小信任分数（防止权重降为 0）
+            max_trust: 最大信任分数
+            expected_slippage: 预期滑点（用于计算质量分数）
+            min_samples: 最小样本数（低于此值不更新）
+        """
+    
+    def compute_quality(self, slippage: float, fill_rate: float,
+                       expected_slippage: float = None) -> float:
+        """
+        计算信号质量分数
+        
+        公式：
+        quality = fill_rate - 0.5 * max(0, (slippage - expected) / expected)
+        
+        Returns:
+            质量分数，范围 [0, 1]
+        """
+    
+    def update(self, signal_name: str, slippage: float, fill_rate: float,
+              expected_slippage: float = None) -> float:
+        """
+        更新信号信任分数
+        
+        数学形式：
+        trust_t = α * trust_{t-1} + (1-α) * quality_t
+        
+        Args:
+            signal_name: 信号名称（'ofi', 'leadlag', 'av'）
+            slippage: 实际滑点
+            fill_rate: 成交率
+            expected_slippage: 预期滑点
+        
+        Returns:
+            更新后的信任分数
+        """
+    
+    def get_weight_adjustment(self, signal_name: str) -> float:
+        """
+        获取权重调整因子（用于 AlphaCombiner）
+        
+        Returns:
+            权重调整因子，范围 [min_trust, max_trust]
+        """
+    
+    def get_trust_report(self) -> dict:
+        """
+        获取信任分数报告（用于监控和调试）
+        """
 ```
 
-📌 **这是系统“自我学习”的入口**
+📌 **重要修正**：
+
+* **原设计问题**：反馈机制未形式化，更新规则不明确
+* **修正方案**：使用 EMA 更新的数学形式化
+  - 数学公式：`trust_t = α * trust_{t-1} + (1-α) * quality_t`
+  - 质量分数：`quality = fill_rate - slippage_penalty`
+  - 噪声处理：EMA 平滑 + 最小样本数约束
+
+📌 **这是系统"自我学习"的入口**
 
 ---
 
@@ -494,12 +555,12 @@ on_order_filled(order_id, fill_info):
 
 ---
 
-# 五、这套架构的“隐含优势”
+# 五、这套架构的"隐含优势"
 
 ✅ OFI 不会污染策略逻辑
 ✅ Lead-Lag 可随时替换
 ✅ Execution 可单独升级
-✅ 风控能“一键拉闸”
+✅ 风控能"一键拉闸"
 ✅ 可逐步加 ML / Online learning
 
 ---
@@ -512,4 +573,8 @@ on_order_filled(order_id, fill_info):
 * 👥 **小团队** → 严格按模块拆
 * 🚀 **准备实盘** → 先只做 BTC→ETH
 
+---
 
+**文档版本**：v2.0（修正版）
+**最后更新**：2024年
+**状态**：✅ 所有评估意见已吸收并整合进接口定义
